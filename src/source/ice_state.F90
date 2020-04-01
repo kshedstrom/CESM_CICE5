@@ -11,7 +11,7 @@
 ! aicen(i,j,n)         aice(i,j)           ---
 ! vicen(i,j,n)         vice(i,j)           m
 ! vsnon(i,j,n)         vsno(i,j)           m
-! trcrn(i,j,it,n)      trcr(i,j,it)        
+! trcrn(i,j,it,n)      trcr(i,j,it)
 !
 ! Area is dimensionless because aice is the fractional area
 ! (normalized so that the sum over all categories, including open
@@ -92,7 +92,7 @@
 
       integer (kind=int_kind), public :: &
          nbtrcr    ! number of bgc tracers in use
-      
+
       integer (kind=int_kind), public :: &
          nt_Tsfc  , & ! ice/snow temperature
          nt_qice  , & ! volume-weighted ice enthalpy (in layers)
@@ -109,16 +109,16 @@
          nt_aero  , & ! starting index for aerosols in ice
          nt_iso   , & ! starting index for isotopes in ice
          nt_bgc_N_sk,   & ! algae (skeletal layer)
-         nt_bgc_C_sk,   & ! 
-         nt_bgc_chl_sk, & ! 
-         nt_bgc_Nit_sk, & ! nutrients (skeletal layer) 
-         nt_bgc_Am_sk,  & ! 
+         nt_bgc_C_sk,   & !
+         nt_bgc_chl_sk, & !
+         nt_bgc_Nit_sk, & ! nutrients (skeletal layer)
+         nt_bgc_Am_sk,  & !
          nt_bgc_Sil_sk, & !
          nt_bgc_DMSPp_sk, & ! trace gases (skeletal layer)
-         nt_bgc_DMSPd_sk, & ! 
-         nt_bgc_DMS_sk, & ! 
-         nt_bgc_Nit_ml, & ! nutrients (ocean mixed layer) 
-         nt_bgc_Am_ml,  & ! 
+         nt_bgc_DMSPd_sk, & !
+         nt_bgc_DMS_sk, & !
+         nt_bgc_Nit_ml, & ! nutrients (ocean mixed layer)
+         nt_bgc_Am_ml,  & !
          nt_bgc_Sil_ml, & !
          nt_bgc_DMSP_ml, & ! trace gases (ocean mixed layer)
          nt_bgc_DMS_ml
@@ -148,7 +148,7 @@
          strength     ! ice strength (N/m)
 
       !-----------------------------------------------------------------
-      ! ice state at start of time step, saved for later in the step 
+      ! ice state at start of time step, saved for later in the step
       !-----------------------------------------------------------------
 
       real (kind=dbl_kind), dimension(nx_block,ny_block,max_blocks), &

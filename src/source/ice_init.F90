@@ -68,7 +68,8 @@
       use ice_grid, only: grid_file, gridcpl_file, kmt_file, grid_type, grid_format
       use ice_lvl, only: restart_lvl
       use ice_mechred, only: kstrength, krdg_partic, krdg_redist, mu_rdg, Cf
-      use ice_dyn_shared, only: ndte, kdyn, revised_evp, yield_curve
+      use ice_dyn_shared, only: ndte, kdyn, revised_evp, yield_curve, &
+                                l_basalstress, k1, k2, u0, CC, Kt, e_ratio
       use ice_shortwave, only: albicev, albicei, albsnowv, albsnowi, ahmax, &
                                shortwave, albedo_type, R_ice, R_pnd, &
                                R_snw, dT_mlt, rsnw_mlt, kalg
@@ -151,6 +152,10 @@
         hs0,            dpscale,         frzpnd,                        &
         rfracmin,       rfracmax,        pndaspect,     hs1,            &
         hp1
+
+      namelist /landfast_nml/ &
+        l_basalstress,  k1,             k2,              u0,            &
+        CC,             Kt,             e_ratio
 
       namelist /forcing_nml/ &
         atmbndy,        fyear_init,      ycycle,        atm_data_format,&
@@ -268,6 +273,14 @@
       ahmax     = 0.3_dbl_kind    ! thickness above which ice albedo is constant (m)
       atmbndy   = 'default'       ! or 'constant'
 
+      l_basalstress = .false.     ! Landfast ice parameterization switch
+      k1 = 8                      ! See Lemieux et al. (2015) for explanation
+      k2 = 15                     ! of these values.
+      u0 = 5e-5                   !
+      CC = 20
+      Kt = 0.0                    ! Yield curve offset - use 0.05 for Lemieux 2016
+      e_ratio = 2.0               ! Ellipticity of yield curve = 1.4 for some tensile strength
+
       fyear_init = 1900           ! first year of forcing cycle
       ycycle = 1                  ! number of years in forcing cycle
       atm_data_format = 'bin'     ! file format ('bin'=binary or 'nc'=netcdf)
@@ -366,6 +379,9 @@
                if (nml_error /= 0) exit
             print*,'Reading ponds_nml'
                read(nu_nml, nml=ponds_nml,iostat=nml_error)
+               if (nml_error /= 0) exit
+            print*,'Reading landfast_nml'
+               read(nu_nml, nml=landfast_nml,iostat=nml_error)
                if (nml_error /= 0) exit
             print*,'Reading forcing_nml'
                read(nu_nml, nml=forcing_nml,iostat=nml_error)
@@ -786,6 +802,14 @@
       call broadcast_array (lonpnt(1:2),        master_task)
       call broadcast_scalar(runid,              master_task)
       call broadcast_scalar(runtype,            master_task)
+      call broadcast_scalar(l_basalstress,      master_task)
+      call broadcast_scalar(k1,                 master_task)
+      call broadcast_scalar(k2,                 master_task)
+      call broadcast_scalar(u0,                 master_task)
+      call broadcast_scalar(CC,                 master_task)
+      call broadcast_scalar(Kt,                 master_task)
+      call broadcast_scalar(e_ratio,            master_task)
+
 
       if (dbug) & ! else only master_task writes to file
       call broadcast_scalar(nu_diag,            master_task)
@@ -941,6 +965,14 @@
          write(nu_diag,1000) ' albsnowi                  = ', albsnowi
          write(nu_diag,1000) ' ahmax                     = ', ahmax
          endif
+
+         write(nu_diag,1010) ' l_basalstress             = ', l_basalstress
+         write(nu_diag,1000) ' k1                        = ', k1
+         write(nu_diag,1000) ' k2                        = ', k2
+         write(nu_diag,1000) ' u0                        = ', u0
+         write(nu_diag,1000) ' CC                        = ', CC
+         write(nu_diag,1000) ' Kt                        = ', Kt
+         write(nu_diag,1000) ' e_ratio                   = ', e_ratio
 
          write(nu_diag,1000) ' rfracmin                  = ', rfracmin
          write(nu_diag,1000) ' rfracmax                  = ', rfracmax
@@ -1405,7 +1437,7 @@
                                 aicen,    trcrn, &
                                 vicen,    vsnon)
 
-      use ice_constants, only: c0, c1, c2, c3, p2, p5, rhoi, rhos, Lfresh, &
+      use ice_constants, only: c0, c1, c2, c3, p2, p4, p5, rhoi, rhos, Lfresh, &
            cp_ice, cp_ocn, Tsmelt, Tffresh, rad_to_deg, puny
       use ice_domain_size, only: nilyr, nslyr, nx_global, ny_global, max_ntrcr, ncat
       use ice_state, only: nt_Tsfc, nt_qice, nt_qsno, nt_sice, &

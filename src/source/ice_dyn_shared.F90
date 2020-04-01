@@ -18,7 +18,7 @@
       implicit none
       private
       public :: init_evp, set_evp_parameters, stepu, principal_stress, &
-                evp_prep1, evp_prep2, evp_finish
+                evp_prep1, evp_prep2, evp_finish, calc_basal_stress
 
       ! namelist parameters
 
@@ -29,11 +29,30 @@
       logical (kind=log_kind), public :: &
          revised_evp  ! if true, use revised evp procedure
 
+      logical (kind=log_kind), public :: &
+         l_basalstress ! if true, use landfast ice parameterization
+
+       ! landfast ice parameters
+
+       real (kind=dbl_kind), public :: &
+         k1       , &  ! first free parameter
+         k2       , &  ! second free parameter (Nm^-3)
+         u0       , &  ! residual velocity     (m/s)
+         CC        ! basal stress ice concentration parameter
+                   ! note: CC=Cb in Lemieux et al JGR 2015 (badly chosen name)
+
+       real (kind=dbl_kind), public :: &
+         e_ratio       ! ellipticity of yield curve
+
+       ! ice isotropic tensile strength parameter
+       real (kind=dbl_kind), public :: &
+         Kt            ! T=Kt*P (tensile strength: see Konig and Holland, 2010)
+
       ! other EVP parameters
 
-      character (len=char_len), public :: & 
+      character (len=char_len), public :: &
          yield_curve  ! 'ellipse' ('teardrop' needs further testing)
-                                                                      ! 
+                                                                      !
       real (kind=dbl_kind), parameter, public :: &
          eyc = 0.36_dbl_kind, &
                          ! coefficient for calculating the parameter E
@@ -47,18 +66,26 @@
          ecci     , & ! 1/e^2
          dtei     , & ! 1/dte, where dte is subcycling timestep (1/s)
          dte2T    , & ! dte/2T
-         denom1       ! constants for stress equation
+         denom1   , & ! constants for stress equation
+         denom2       !
 
       real (kind=dbl_kind), public :: & ! Bouillon et al relaxation constants
          arlx1i   , & ! alpha1 for stressp
          brlx         ! beta   for momentum
 
-      real (kind=dbl_kind), allocatable, public :: & 
+      real (kind=dbl_kind), allocatable, public :: &
          fcor_blk(:,:,:)   ! Coriolis parameter (1/s)
 
-      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks), public :: & 
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks), public :: &
          uvel_init, & ! x-component of velocity (m/s), beginning of timestep
          vvel_init    ! y-component of velocity (m/s), beginning of timestep
+
+      character (len=char_len) :: &
+         param_type    ! 'jfl' JF's parametrization
+
+       real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks), public :: &
+         tau_bu   , &  ! basal stress u-component
+         tau_bv        ! basal stress v-component
 
 !=======================================================================
 
@@ -109,8 +136,9 @@
       do i = 1, nx_block
 
          ! velocity
-         uvel(i,j,iblk) = c0    ! m/s
-         vvel(i,j,iblk) = c0    ! m/s
+! jfl We now start with an initial velo field from a previous forecast
+!         uvel(i,j,iblk) = c0    ! m/s
+!         vvel(i,j,iblk) = c0    ! m/s
 
          ! strain rates
          divu (i,j,iblk) = c0
@@ -137,7 +165,10 @@
          stress12_4(i,j,iblk) = c0
 
          ! ice extent mask on velocity points
-         iceumask(i,j,iblk) = .false.
+! jfl Needs to be set to T as we now start with an ini velo field from a previous
+! forecast. When set to F, the ini velo field is the clim ocn current field.
+         iceumask(i,j,iblk) = .true.
+!        iceumask(i,j,iblk) = .false.
 
       enddo                     ! i
       enddo                     ! j
@@ -183,8 +214,10 @@
       dtei = c1/dte              ! 1/s
 
       ! major/minor axis length ratio, squared
-      ecc  = c4
-      ecci = p25                  ! 1/ecc
+!      ecc  = c4
+!      ecci = p25                  ! 1/ecc
+      ecc  = e_ratio**2
+      ecci = c1/ecc                ! 1/ecc
 
       ! constants for stress equation
       tdamp2 = c2*eyc*dt                    ! s
@@ -225,9 +258,10 @@
                   sqrt(brlx/(arlx1i*gamma))*xmin, &
                   p5*brlx/gamma*xmin**2, &
                   p5*xmin*sqrt(brlx*arlx1i/gamma)
-      endif            
+      endif
 
       denom1 = c1/(c1+arlx1i)
+      denom2 = c1/(c1+dte2T*ecc)
 
       end subroutine set_evp_parameters
 
@@ -240,12 +274,12 @@
 !
 ! author: Elizabeth C. Hunke, LANL
 
-      subroutine evp_prep1 (nx_block,  ny_block, & 
+      subroutine evp_prep1 (nx_block,  ny_block, &
                             ilo, ihi,  jlo, jhi, &
-                            aice,      vice,     & 
-                            vsno,      tmask,    & 
-                            strairxT,  strairyT, & 
-                            strairx,   strairy,  & 
+                            aice,      vice,     &
+                            vsno,      tmask,    &
+                            strairxT,  strairyT, &
+                            strairx,   strairy,  &
                             tmass,     icetmask)
 
       use ice_constants, only: c0, rhoi, rhos
@@ -254,7 +288,7 @@
          nx_block, ny_block, & ! block dimensions
          ilo,ihi,jlo,jhi       ! beginning and end of physical domain
 
-      real (kind=dbl_kind), dimension (nx_block,ny_block), & 
+      real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(in) :: &
          aice    , & ! concentration of ice
          vice    , & ! volume per unit area of ice          (m)
@@ -262,17 +296,17 @@
          strairxT, & ! stress on ice by air, x-direction
          strairyT    ! stress on ice by air, y-direction
 
-      logical (kind=log_kind), dimension (nx_block,ny_block), & 
+      logical (kind=log_kind), dimension (nx_block,ny_block), &
          intent(in) :: &
          tmask       ! land/boundary mask, thickness (T-cell)
 
-      real (kind=dbl_kind), dimension (nx_block,ny_block), & 
+      real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(out) :: &
          strairx , & ! stress on ice by air, x-direction
          strairy , & ! stress on ice by air, y-direction
          tmass       ! total mass of ice and snow (kg/m^2)
 
-      integer (kind=int_kind), dimension (nx_block,ny_block), & 
+      integer (kind=int_kind), dimension (nx_block,ny_block), &
          intent(out) :: &
          icetmask    ! ice extent mask (T-cell)
 
@@ -301,13 +335,13 @@
       !-----------------------------------------------------------------
       ! ice extent mask (T-cells)
       !-----------------------------------------------------------------
-         tmphm(i,j) = tmask(i,j) .and. (aice (i,j) > a_min) & 
+         tmphm(i,j) = tmask(i,j) .and. (aice (i,j) > a_min) &
                                  .and. (tmass(i,j) > m_min)
 
       !-----------------------------------------------------------------
       ! prep to convert to U grid
       !-----------------------------------------------------------------
-         ! these quantities include the factor of aice needed for 
+         ! these quantities include the factor of aice needed for
          ! correct treatment of free drift
          strairx(i,j) = strairxT(i,j)
          strairy(i,j) = strairyT(i,j)
@@ -324,8 +358,8 @@
       do i = ilo, ihi
 
          ! extend ice extent mask (T-cells) to points around pack
-         if (tmphm(i-1,j+1) .or. tmphm(i,j+1) .or. tmphm(i+1,j+1) .or. & 
-             tmphm(i-1,j)   .or. tmphm(i,j)   .or. tmphm(i+1,j)   .or. & 
+         if (tmphm(i-1,j+1) .or. tmphm(i,j+1) .or. tmphm(i+1,j+1) .or. &
+             tmphm(i-1,j)   .or. tmphm(i,j)   .or. tmphm(i+1,j)   .or. &
              tmphm(i-1,j-1) .or. tmphm(i,j-1) .or. tmphm(i+1,j-1) ) then
             icetmask(i,j) = 1
          endif
@@ -347,30 +381,31 @@
 !
 ! author: Elizabeth C. Hunke, LANL
 
-      subroutine evp_prep2 (nx_block,   ny_block,   & 
+      subroutine evp_prep2 (nx_block,   ny_block,   &
                             ilo, ihi,   jlo, jhi,   &
-                            icellt,     icellu,     & 
-                            indxti,     indxtj,     & 
-                            indxui,     indxuj,     & 
-                            aiu,        umass,      & 
-                            umassdti,   fcor,       & 
-                            umask,                  & 
-                            uocn,       vocn,       & 
-                            strairx,    strairy,    & 
-                            ss_tltx,    ss_tlty,    &  
-                            icetmask,   iceumask,   & 
-                            fm,         dt,         & 
-                            strtltx,    strtlty,    & 
+                            icellt,     icellu,     &
+                            indxti,     indxtj,     &
+                            indxui,     indxuj,     &
+                            aiu,        umass,      &
+                            umassdti,   fcor,       &
+                            umask,                  &
+                            uocn,       vocn,       &
+                            strairx,    strairy,    &
+                            ss_tltx,    ss_tlty,    &
+                            icetmask,   iceumask,   &
+                            fm,         dt,         &
+                            Cbu,                    &
+                            strtltx,    strtlty,    &
                             strocnx,    strocny,    &
                             strintx,    strinty,    &
-                            waterx,     watery,     & 
-                            forcex,     forcey,     &     
-                            stressp_1,  stressp_2,  &   
-                            stressp_3,  stressp_4,  & 
-                            stressm_1,  stressm_2,  & 
-                            stressm_3,  stressm_4,  & 
-                            stress12_1, stress12_2, & 
-                            stress12_3, stress12_4, & 
+                            waterx,     watery,     &
+                            forcex,     forcey,     &
+                            stressp_1,  stressp_2,  &
+                            stressp_3,  stressp_4,  &
+                            stressm_1,  stressm_2,  &
+                            stressm_3,  stressm_4,  &
+                            stress12_1, stress12_2, &
+                            stress12_3, stress12_4, &
                             uvel_init,  vvel_init,  &
                             uvel,       vvel)
 
@@ -384,22 +419,22 @@
          icellt   , & ! no. of cells where icetmask = 1
          icellu       ! no. of cells where iceumask = 1
 
-      integer (kind=int_kind), dimension (nx_block*ny_block), & 
+      integer (kind=int_kind), dimension (nx_block*ny_block), &
          intent(out) :: &
          indxti   , & ! compressed index in i-direction
          indxtj   , & ! compressed index in j-direction
          indxui   , & ! compressed index in i-direction
          indxuj       ! compressed index in j-direction
 
-      logical (kind=log_kind), dimension (nx_block,ny_block), & 
+      logical (kind=log_kind), dimension (nx_block,ny_block), &
          intent(in) :: &
          umask       ! land/boundary mask, thickness (U-cell)
 
-      integer (kind=int_kind), dimension (nx_block,ny_block), & 
+      integer (kind=int_kind), dimension (nx_block,ny_block), &
          intent(in) :: &
          icetmask    ! ice extent mask (T-cell)
 
-      logical (kind=log_kind), dimension (nx_block,ny_block), & 
+      logical (kind=log_kind), dimension (nx_block,ny_block), &
          intent(inout) :: &
          iceumask    ! ice extent mask (U-cell)
 
@@ -417,7 +452,7 @@
       real (kind=dbl_kind), intent(in) :: &
          dt          ! time step
 
-      real (kind=dbl_kind), dimension (nx_block,ny_block), & 
+      real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(out) :: &
          uvel_init,& ! x-component of velocity (m/s), beginning of time step
          vvel_init,& ! y-component of velocity (m/s), beginning of time step
@@ -425,9 +460,10 @@
          waterx  , & ! for ocean stress calculation, x (m/s)
          watery  , & ! for ocean stress calculation, y (m/s)
          forcex  , & ! work array: combined atm stress and ocn tilt, x
-         forcey      ! work array: combined atm stress and ocn tilt, y
+         forcey  , & ! work array: combined atm stress and ocn tilt, y
+         Cbu         ! landfast basal stress factor !pblain
 
-      real (kind=dbl_kind), dimension (nx_block,ny_block), & 
+      real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(inout) :: &
          fm      , & ! Coriolis param. * mass in U-cell (kg/s)
          stressp_1, stressp_2, stressp_3, stressp_4 , & ! sigma11+sigma22
@@ -461,6 +497,7 @@
          forcex   (i,j) = c0
          forcey   (i,j) = c0
          umassdti (i,j) = c0
+         Cbu      (i,j) = c0
 
          if (revp==1) then               ! revised evp
             stressp_1 (i,j) = c0
@@ -521,7 +558,7 @@
 
          ! ice extent mask (U-cells)
          iceumask_old(i,j) = iceumask(i,j) ! save
-         iceumask(i,j) = (umask(i,j)) .and. (aiu  (i,j) > a_min) & 
+         iceumask(i,j) = (umask(i,j)) .and. (aiu  (i,j) > a_min) &
                                       .and. (umass(i,j) > m_min)
 
          if (iceumask(i,j)) then
@@ -592,7 +629,8 @@
 ! author: Elizabeth C. Hunke, LANL
 
       subroutine stepu (nx_block,   ny_block, &
-                        icellu,     Cw,       &
+                        icellu,     ksub,     &
+                        Cw,                   &
                         indxui,     indxuj,   &
                         aiu,        str,      &
                         uocn,       vocn,     &
@@ -603,11 +641,14 @@
                         strocnx,    strocny,  &
                         strintx,    strinty,  &
                         uvel_init,  vvel_init,&
-                        uvel,       vvel)
+                        uvel,       vvel,     &
+                        Cbu,                  &
+                        tau_bu,     tau_bv)
 
       integer (kind=int_kind), intent(in) :: &
          nx_block, ny_block, & ! block dimensions
-         icellu                ! total count when iceumask is true
+         icellu,             & ! total count when iceumask is true
+         ksub                  ! subcycling iteration
 
       integer (kind=int_kind), dimension (nx_block*ny_block), &
          intent(in) :: &
@@ -626,7 +667,8 @@
          uocn    , & ! ocean current, x-direction (m/s)
          vocn    , & ! ocean current, y-direction (m/s)
          fm      , & ! Coriolis param. * mass in U-cell (kg/s)
-         uarear      ! 1/uarea
+         uarear  , & ! 1/uarea
+         Cbu         ! landfast basal stress factor !pblain
 
       real (kind=dbl_kind), dimension(nx_block,ny_block,8), &
          intent(in) :: &
@@ -646,6 +688,11 @@
 
       real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(inout) :: &
+         tau_bu , & ! basal stress u-component
+         tau_bv     ! basal stress v-component
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block), &
+         intent(inout) :: &
          Cw                   ! ocean-ice neutral drag coefficient
 
       ! local variables
@@ -657,7 +704,7 @@
          uold, vold        , & ! old-time uvel, vvel
          vrel              , & ! relative ice-ocean velocity
          cca,ccb,ab2,cc1,cc2,& ! intermediate variables
-         taux, tauy            ! part of ocean stress term          
+         taux, tauy            ! part of ocean stress term
 
       !-----------------------------------------------------------------
       ! integrate the momentum equation
@@ -677,9 +724,13 @@
          taux = vrel*waterx(i,j) ! NOTE this is not the entire
          tauy = vrel*watery(i,j) ! ocn stress term
 
+         ! basal stress (landfast) !pblain
+         ! check ici pas besoin de tout aice, vice...a modifier jfl
+         ! on pourrait aussi calc Cbu(i,j) a la place???
+
          ! revp = 0 for classic evp, 1 for revised evp
-         cca = (brlx + revp)*umassdti(i,j) + vrel * cosw ! kg/m^2 s
-         ccb = fm(i,j) + sign(c1,fm(i,j)) * vrel * sinw ! kg/m^2 s
+         cca = (brlx + revp)*umassdti(i,j) + vrel * cosw + Cbu(i,j) ! kg/m^2 s
+         ccb = fm(i,j) + sign(c1,fm(i,j)) * vrel * sinw + Cbu(i,j) ! kg/m^2 s
 
          ab2 = cca**2 + ccb**2
 
@@ -697,6 +748,13 @@
 
          uvel(i,j) = (cca*cc1 + ccb*cc2) / ab2 ! m/s
          vvel(i,j) = (cca*cc2 - ccb*cc1) / ab2
+
+         ! calculate basal stress component for outputs !pblain
+         if (ksub == ndte) then ! on last subcycling iteration
+           tau_bu(i,j) = Cbu(i,j)*uvel(i,j)
+           tau_bv(i,j) = Cbu(i,j)*vvel(i,j)
+         endif
+!jfl         ou on fait une routine du genre principal_stress????
 
       !-----------------------------------------------------------------
       ! ocean-ice stress for coupling
@@ -725,7 +783,7 @@
                              strintx,  strinty,  &
                              strairx,  strairy,  &
                              strocnx,  strocny,  &
-                             strocnxT, strocnyT) 
+                             strocnxT, strocnyT)
 
       integer (kind=int_kind), intent(in) :: &
          nx_block, ny_block, & ! block dimensions
@@ -763,7 +821,7 @@
       real (kind=dbl_kind) :: vrel
       real (kind=dbl_kind), dimension (nx_block,ny_block), &
          intent(inout) :: &
-         Cw                   ! ocean-ice neutral drag coefficient 
+         Cw                   ! ocean-ice neutral drag coefficient
 
       do j = 1, ny_block
       do i = 1, nx_block
@@ -785,7 +843,7 @@
 !        strocny(i,j) = strocny(i,j) &
 !                     - vrel*(vvel(i,j)*cosw + uvel(i,j)*sinw) * aiu(i,j)
 
-         ! update strocnx to most recent iterate and complete the term       
+         ! update strocnx to most recent iterate and complete the term
          vrel = vrel * aiu(i,j)
          strocnx(i,j) = vrel*((uocn(i,j) - uvel(i,j))*cosw &
                             - (vocn(i,j) - vvel(i,j))*sinw*sign(c1,fm(i,j)))
@@ -832,27 +890,129 @@
          sig1    , & ! principal stress component
          sig2        ! principal stress component
 
+      real (kind=dbl_kind) :: ptit
+
       ! local variables
 
       integer (kind=int_kind) :: i, j
 
+      ptit = 0.001
+      ! Est-ce que replacement pressure doit etre utilise ou
+      ! ice strength pour la normalization des stress??? jfl
       do j = 1, ny_block
       do i = 1, nx_block
-         if (prs_sig(i,j) > puny) then
+         if (prs_sig(i,j) > ptit) then
+            ! not normalized yet
             sig1(i,j) = (p5*(stressp_1(i,j) &
-                      + sqrt(stressm_1(i,j)**2+c4*stress12_1(i,j)**2))) &
-                      / prs_sig(i,j)
+                      + sqrt(stressm_1(i,j)**2+c4*stress12_1(i,j)**2)))
             sig2(i,j) = (p5*(stressp_1(i,j) &
-                      - sqrt(stressm_1(i,j)**2+c4*stress12_1(i,j)**2))) &
-                      / prs_sig(i,j)
+                      - sqrt(stressm_1(i,j)**2+c4*stress12_1(i,j)**2)))
+
+            ! normalization of principal stresses (long axis of ellipse = 1)
+            ! output pressure is not normalized
+            sig1(i,j) = sig1(i,j) / ( prs_sig(i,j) * (1 + Kt) )
+
+            sig2(i,j) = sig2(i,j) / ( prs_sig(i,j) * (1 + Kt) )
          else
-            sig1(i,j) = spval_dbl
-            sig2(i,j) = spval_dbl
+            sig1(i,j) = c0 !spval_dbl
+            sig2(i,j) = c0 !spval_dbl
          endif
       enddo
       enddo
 
       end subroutine principal_stress
+
+!=======================================================================
+!BOP
+!
+! !IROUTINE: calc_basal_stress - computes basal stress for landfast
+!
+! !INTERFACE:
+!
+      subroutine calc_basal_stress(nx_block, ny_block, icellu, &
+                                   indxui,   indxuj,           &
+                                   vice,     aice,             &
+                                   bath,                       &
+                                   uold,     vold,             &
+                                   Cbu)
+!
+! !DESCRIPTION:
+!
+! Computes basal stress due to landfast ice
+!
+! !REVISION HISTORY:
+!
+! author: Philippe Blain, RPN-E (coop E2015)
+!
+! !USES:
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+      integer (kind=int_kind), intent(in) :: &
+         nx_block, ny_block, &  ! block dimensions
+         icellu                 ! no. of cells where icetmask = 1
+
+      integer (kind=int_kind), dimension (nx_block*ny_block), &
+         intent(in) :: &
+         indxui   , & ! compressed index in i-direction
+         indxuj       ! compressed index in j-direction
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block), intent(in) :: &
+         aice    , & ! concentration of ice at tracer location
+         vice    , & ! volume per unit area of ice at tracer location
+         bath    , & ! bathymetry at tracer location
+         uold    , & ! u component of ice speed at previous iteration
+         vold        ! v component of ice speed at previous iteration
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block), intent(inout) :: &
+         Cbu         ! landfast basal stress factor at u location
+
+!
+!EOP
+
+      real (kind=dbl_kind) &
+         au,  & ! concentration of ice at u location
+         hu,  & ! volume per unit area of ice at u location (mean thickness)
+         hwu, & ! bathymetry at u location
+         hcu    ! critical thickness at u location
+
+      integer (kind=int_kind) :: &
+         i, j, ij
+
+!       k1 = 20
+!       k2 = 5
+!       u0 = 5e-5
+!       CC  = c20
+
+      do ij = 1, icellu
+         i = indxui(ij)
+         j = indxuj(ij)
+
+         ! convert quantities to u-location
+         au  = max(aice(i,j),aice(i+1,j),aice(i,j+1),aice(i+1,j+1))
+         hwu = min(bath(i,j),bath(i+1,j),bath(i,j+1),bath(i+1,j+1))
+         hu  = max(vice(i,j),vice(i+1,j),vice(i,j+1),vice(i+1,j+1))
+
+         ! calculate basal stress factor
+         ! 1- calculate critical thickness
+         hcu = au * hwu / k1
+
+         ! 2- calculate stress factor
+         if (au > p01 .and. hu > hcu ) then
+!           if (mod(ij,10)==1) then
+!              write(nu_diag,*) 'hcu(i,j)',hcu,i,j
+!              write(nu_diag,*) 'hu',hu
+!              write(nu_diag,*) 'hwu',hwu
+!           endif
+           Cbu(i,j) = ( k2 / (sqrt(uold(i,j)**2 + vold(i,j)**2) + u0) ) &
+                      * (hu - hcu) * exp(-CC * (1 - au))
+         else
+           Cbu(i,j) = c0
+         endif
+
+      enddo                     ! ij
+
+      end subroutine calc_basal_stress
 
 !=======================================================================
 
